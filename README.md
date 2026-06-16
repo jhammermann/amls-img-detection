@@ -21,7 +21,7 @@ The data folder is read-only (requirement from the task pdf) and as a reminder, 
 
 
 # Git
-We will work in feature branches and merge into main when the feature is complete. The merge request will need to be approved by another team member, nobody can push onto main directly. We will squash the commits, so don't worry about doing too many commits on your feature branch.
+We will work in feature branches and merge into main when the feature is complete. The pull request will need to be approved by another team member, nobody can push onto main directly. We will squash the commits, so don't worry about doing too many commits on your feature branch.
 
 # Important requirements
 Some important information excerpts cited from the tasks pdf:
