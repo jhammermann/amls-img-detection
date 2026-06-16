@@ -122,3 +122,5 @@ runs/
 data/
 models/
 *.pdf
+artifacts/
+data-readonly/
