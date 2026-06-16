@@ -23,6 +23,22 @@ The data folder is read-only (requirement from the task pdf) and as a reminder, 
 # Git
 We will work in feature branches and merge into main when the feature is complete. The pull request will need to be approved by another team member, nobody can push onto main directly. We will squash the commits, so don't worry about doing too many commits on your feature branch.
 
+### Branch naming schema:
+```text
+<category>/<short-description>
+```
+### Four Main Categories:
+
+* **`feat/`** – For new features or code additions.
+* *Example:* `feat/user-login`
+* **`fix/`** – For fixing broken code or bugs.
+* *Example:* `fix/jwt-expiration`
+* **`chore/`** – For routine maintenance, updating dependencies, or tooling/Docker changes.
+* *Example:* `chore/add-dockerfile`
+* **`docs/`** – For documentation updates only.
+* *Example:* `docs/update-readme`
+
+
 # Important requirements
 Some important information excerpts cited from the tasks pdf:
 
