@@ -24,6 +24,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -37,9 +38,10 @@ SOURCE_CLASS_NAMES = {
     4: "DALL-E 3",
     5: "Midjourney",
 }
-DEFAULT_LARGE_IMAGE_SIZE = (320, 320)
-DEFAULT_SMALL_IMAGE_SIZE = (270, 270)
-DEFAULT_SIZE_THRESHOLD = 320
+DEFAULT_IMAGE_SIZE = (256, 256)
+DEFAULT_LARGE_IMAGE_SIZE = DEFAULT_IMAGE_SIZE
+DEFAULT_SMALL_IMAGE_SIZE = DEFAULT_IMAGE_SIZE
+DEFAULT_SIZE_THRESHOLD = DEFAULT_IMAGE_SIZE[0]
 
 
 def require_pyarrow():
@@ -118,7 +120,6 @@ def analyze_training_data(parquet_paths: list[Path]) -> dict:
         source_class = int(row["source_class"])
         label = 0 if source_class == 0 else 1
         width, height, image_format = decode_image_info(image_bytes)
-        byte_length = len(image_bytes)
         aspect_ratio = (width / height) if width and height else None
 
         class_counts[label] += 1
@@ -132,7 +133,6 @@ def analyze_training_data(parquet_paths: list[Path]) -> dict:
             "source_class_name": SOURCE_CLASS_NAMES.get(source_class, str(source_class)),
             "binary_label": label,
             "class_name": LABEL_NAMES.get(label, str(label)),
-            "byte_length": byte_length,
             "width": width,
             "height": height,
             "aspect_ratio": aspect_ratio,
@@ -140,7 +140,6 @@ def analyze_training_data(parquet_paths: list[Path]) -> dict:
         }
         rows.append(record)
 
-        by_class[label]["byte_length"].append(byte_length)
         if width is not None:
             by_class[label]["width"].append(width)
         if height is not None:
@@ -154,7 +153,6 @@ def analyze_training_data(parquet_paths: list[Path]) -> dict:
         "source_class_counts": dict(sorted(source_class_counts.items())),
         "decode_failures": decode_failures,
         "overall": {
-            "byte_length": describe([r["byte_length"] for r in rows]),
             "width": describe([r["width"] for r in rows if r["width"] is not None]),
             "height": describe([r["height"] for r in rows if r["height"] is not None]),
             "aspect_ratio": describe([r["aspect_ratio"] for r in rows if r["aspect_ratio"] is not None]),
@@ -173,7 +171,6 @@ def save_rows_csv(rows: list[dict], output_path: Path) -> None:
         "source_class_name",
         "binary_label",
         "class_name",
-        "byte_length",
         "width",
         "height",
         "aspect_ratio",
@@ -210,47 +207,35 @@ def plot_class_distribution(class_counts: dict[int, int], output_path: Path) -> 
     plt.close(fig)
 
 
-def plot_source_distribution(source_class_counts: dict[int, int], output_path: Path) -> None:
-    labels = sorted(source_class_counts)
-    counts = np.array([source_class_counts[label] for label in labels], dtype=float)
-    percentages = 100.0 * counts / counts.sum()
+def plot_size_pairs_by_class(rows: list[dict], output_path: Path, limit: int = 6) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=True)
+    colors = {0: "#4c78a8", 1: "#f58518"}
+    for label in sorted(LABEL_NAMES):
+        label_rows = [
+            row for row in rows
+            if row["binary_label"] == label and row["width"] is not None and row["height"] is not None
+        ]
+        counts = Counter((row["width"], row["height"]) for row in label_rows)
+        top_pairs = counts.most_common(limit)
+        labels = [f"{width}x{height}" for (width, height), _ in top_pairs]
+        values = [100 * count / len(label_rows) for _, count in top_pairs]
+        raw_counts = [count for _, count in top_pairs]
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    names = [f"{label}: {SOURCE_CLASS_NAMES.get(label, label)}" for label in labels]
-    bars = ax.bar(names, percentages, color="#72b7b2")
-    ax.set_ylabel("Share of training rows (%)")
-    ax.set_title("Original source-class distribution")
-    ax.tick_params(axis="x", labelrotation=20)
-    for bar, percentage in zip(bars, percentages):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height(),
-            f"{percentage:.1f}%",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
-
-
-def plot_image_size_distribution(rows: list[dict], output_path: Path) -> None:
-    byte_lengths = np.array([row["byte_length"] for row in rows], dtype=float)
-    widths = [row["width"] for row in rows if row["width"] is not None]
-    heights = [row["height"] for row in rows if row["height"] is not None]
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    axes[0].hist(byte_lengths / 1024, bins=40, color="#54a24b")
-    axes[0].set_title("Encoded image byte length")
-    axes[0].set_xlabel("KiB")
-    axes[0].set_ylabel("Images")
-
-    axes[1].scatter(widths, heights, s=10, alpha=0.35, color="#e45756")
-    axes[1].set_title("Decoded image dimensions")
-    axes[1].set_xlabel("Width (px)")
-    axes[1].set_ylabel("Height (px)")
-
+        ax = axes[label]
+        y_positions = np.arange(len(labels))
+        bars = ax.barh(y_positions, values, color=colors[label])
+        ax.set_yticks(y_positions, labels)
+        ax.invert_yaxis()
+        ax.set_title(f"{LABEL_NAMES[label]}: common original sizes")
+        ax.set_xlabel("Share within class (%)")
+        for bar, value, count in zip(bars, values, raw_counts):
+            ax.text(
+                bar.get_width(),
+                bar.get_y() + bar.get_height() / 2,
+                f" {value:.1f}% (n={count})",
+                va="center",
+                fontsize=9,
+            )
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -259,132 +244,122 @@ def plot_image_size_distribution(rows: list[dict], output_path: Path) -> None:
 def plot_image_dimensions_by_class(rows: list[dict], output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
     colors = {0: "#4c78a8", 1: "#f58518"}
+    markers = {0: "o", 1: "s"}
     for label in sorted(LABEL_NAMES):
         label_rows = [
             row for row in rows
             if row["binary_label"] == label and row["width"] is not None and row["height"] is not None
         ]
+        counts = Counter((row["width"], row["height"]) for row in label_rows)
         ax.scatter(
-            [row["width"] for row in label_rows],
-            [row["height"] for row in label_rows],
-            s=10,
-            alpha=0.35,
+            [width for width, _ in counts],
+            [height for _, height in counts],
+            s=[max(20, min(500, count / 4)) for count in counts.values()],
+            alpha=0.45,
             color=colors[label],
+            marker=markers[label],
             label=f"{label}: {LABEL_NAMES[label]}",
         )
-    ax.set_title("Decoded image dimensions by binary class")
+    ax.set_title("Unique original dimensions by class")
     ax.set_xlabel("Width (px)")
     ax.set_ylabel("Height (px)")
-    ax.legend()
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=markers[label],
+            color="none",
+            label=f"{label}: {LABEL_NAMES[label]}",
+            markerfacecolor=colors[label],
+            markeredgecolor=colors[label],
+            markersize=8,
+            alpha=0.45,
+        )
+        for label in sorted(LABEL_NAMES)
+    ]
+    ax.legend(handles=legend_handles)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
 
 
-def top_value_counts(rows: list[dict], field: str, limit: int = 3) -> list[tuple[int, int]]:
-    counts = Counter(row[field] for row in rows if row[field] is not None)
-    return counts.most_common(limit)
+UPSCALE_RISK_THRESHOLDS = (224, 256, 270, 320)
 
 
-def plot_top_dimensions(rows: list[dict], output_path: Path) -> None:
-    top_widths = top_value_counts(rows, "width")
-    top_heights = top_value_counts(rows, "height")
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    for ax, title, values in [
-        (axes[0], "Top 3 widths", top_widths),
-        (axes[1], "Top 3 heights", top_heights),
-    ]:
-        labels = [f"{value}px" for value, _ in values]
-        counts = [count for _, count in values]
-        bars = ax.bar(labels, counts, color="#72b7b2")
-        ax.set_title(title)
-        ax.set_ylabel("Images")
-        for bar, count in zip(bars, counts):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height(),
-                str(count),
-                ha="center",
-                va="bottom",
-                fontsize=9,
+def min_side_threshold_counts(
+    rows: list[dict],
+    thresholds: tuple[int, ...] = UPSCALE_RISK_THRESHOLDS,
+) -> list[dict]:
+    counts = []
+    for label in sorted(LABEL_NAMES):
+        label_rows = [row for row in rows if row["binary_label"] == label]
+        rows_with_dimensions = [
+            row for row in label_rows
+            if row["width"] is not None and row["height"] is not None
+        ]
+        total = len(label_rows)
+        for threshold in thresholds:
+            below = sum(min(row["width"], row["height"]) < threshold for row in rows_with_dimensions)
+            counts.append(
+                {
+                    "label": label,
+                    "class_name": LABEL_NAMES[label],
+                    "threshold": threshold,
+                    "below": below,
+                    "at_least": total - below,
+                    "total": total,
+                    "below_percent": 100 * below / total if total else 0,
+                }
             )
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
+    return counts
 
 
-def plot_top_dimensions_by_class(rows: list[dict], output_path: Path) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-    fields = [("width", "Widths"), ("height", "Heights")]
+def plot_min_side_thresholds_by_class(rows: list[dict], output_path: Path) -> None:
+    counts = min_side_threshold_counts(rows)
+    thresholds = sorted({item["threshold"] for item in counts})
     colors = {0: "#4c78a8", 1: "#f58518"}
 
-    for row_index, label in enumerate(sorted(LABEL_NAMES)):
-        label_rows = [row for row in rows if row["binary_label"] == label]
-        for col_index, (field, title) in enumerate(fields):
-            values = top_value_counts(label_rows, field)
-            ax = axes[row_index][col_index]
-            labels = [f"{value}px" for value, _ in values]
-            counts = [count for _, count in values]
-            bars = ax.bar(labels, counts, color=colors[label])
-            ax.set_title(f"{LABEL_NAMES[label]}: top 3 {title.lower()}")
-            ax.set_ylabel("Images")
-            for bar, count in zip(bars, counts):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4))
+    x = np.arange(len(thresholds))
+    width = 0.36
+    for ax, title, ylabel, field, formatter in [
+        (
+            axes[0],
+            "Images that would need upscaling",
+            "Images (symlog scale)",
+            "below",
+            lambda value: str(int(value)),
+        ),
+        (
+            axes[1],
+            "Share that would need upscaling",
+            "Share within class (%)",
+            "below_percent",
+            lambda value: f"{value:.1f}%",
+        ),
+    ]:
+        for offset, label in [(-width / 2, 0), (width / 2, 1)]:
+            values = [
+                next(item[field] for item in counts if item["label"] == label and item["threshold"] == threshold)
+                for threshold in thresholds
+            ]
+            bars = ax.bar(x + offset, values, width, color=colors[label], label=LABEL_NAMES[label])
+            for bar, value in zip(bars, values):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
                     bar.get_height(),
-                    str(count),
+                    formatter(value),
                     ha="center",
                     va="bottom",
                     fontsize=9,
                 )
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
-
-
-def real_min_side_counts(rows: list[dict], thresholds: tuple[int, ...] = (270, 320)) -> list[dict]:
-    real_rows = [
-        row for row in rows
-        if row["binary_label"] == 0 and row["width"] is not None and row["height"] is not None
-    ]
-    total = len(real_rows)
-    counts = []
-    for threshold in thresholds:
-        below = sum(min(row["width"], row["height"]) < threshold for row in real_rows)
-        counts.append(
-            {
-                "threshold": threshold,
-                "below": below,
-                "at_least": total - below,
-                "total": total,
-                "below_percent": 100 * below / total if total else 0,
-            }
-        )
-    return counts
-
-
-def plot_real_min_side_thresholds(rows: list[dict], output_path: Path) -> None:
-    counts = real_min_side_counts(rows)
-    labels = [f"< {item['threshold']}px\nmin side" for item in counts]
-    values = [item["below"] for item in counts]
-    percentages = [item["below_percent"] for item in counts]
-
-    fig, ax = plt.subplots(figsize=(7, 4))
-    bars = ax.bar(labels, values, color="#4c78a8")
-    ax.set_title("Real images smaller than AI dimension thresholds")
-    ax.set_ylabel("Real images")
-    for bar, value, percentage in zip(bars, values, percentages):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height(),
-            f"{value}\n({percentage:.1f}%)",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(x, [f"{threshold}px target" for threshold in thresholds], rotation=15)
+        ax.legend()
+    axes[0].set_yscale("symlog", linthresh=10)
+    max_absolute = max(item["below"] for item in counts)
+    axes[0].set_ylim(0, max_absolute * 1.6 if max_absolute else 1)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -397,6 +372,8 @@ def choose_clean_size(
     large_size: tuple[int, int] = DEFAULT_LARGE_IMAGE_SIZE,
     size_threshold: int = DEFAULT_SIZE_THRESHOLD,
 ) -> tuple[int, int]:
+    if small_size == large_size:
+        return small_size
     if width >= size_threshold and height >= size_threshold:
         return large_size
     return small_size
@@ -457,13 +434,13 @@ def ai_small_keep_limit(
     return min(ai_small, int(ai_large * real_small / real_large))
 
 
-def largest_class_gaps(analysis: dict) -> list[str]:
+def class_size_signal_lines(analysis: dict) -> list[str]:
     by_class = analysis["by_class"]
     if "0" not in by_class or "1" not in by_class:
-        return ["Only one class was found, so class-separating characteristics cannot be compared."]
+        return ["- Only one class was found, so class-separating characteristics cannot be compared."]
 
     notes = []
-    for metric in ["byte_length", "width", "height", "aspect_ratio"]:
+    for metric in ["width", "height", "aspect_ratio"]:
         stats_0 = by_class["0"].get(metric, {})
         stats_1 = by_class["1"].get(metric, {})
         if not stats_0 or not stats_1:
@@ -477,6 +454,13 @@ def largest_class_gaps(analysis: dict) -> list[str]:
             f"(relative gap {relative_gap:.1%})."
         )
     return notes
+
+
+def compact_stats(stats: dict[str, float]) -> str:
+    return (
+        f"median {stats['median']}, p05 {stats['p05']}, "
+        f"p95 {stats['p95']}, range {stats['min']}..{stats['max']}"
+    )
 
 
 def write_report(
@@ -496,111 +480,72 @@ def write_report(
             f"{count} rows ({100 * count / total:.2f}%)"
         )
 
-    source_lines = []
-    for label, count in sorted(analysis["source_class_counts"].items()):
-        source_lines.append(
-            f"- Source {label} (`{SOURCE_CLASS_NAMES.get(label, label)}`): "
-            f"{count} rows ({100 * count / total:.2f}%)"
-        )
-
-    stats_lines = []
-    for metric, stats in analysis["overall"].items():
-        stats_lines.append(f"- `{metric}`: {stats}")
-
-    top_width_lines = [
-        f"- {value}px: {count} images"
-        for value, count in top_value_counts(analysis["rows"], "width")
+    stats_lines = [
+        f"- Width: {compact_stats(analysis['overall']['width'])}",
+        f"- Height: {compact_stats(analysis['overall']['height'])}",
+        f"- Aspect ratio: {compact_stats(analysis['overall']['aspect_ratio'])}",
     ]
-    top_height_lines = [
-        f"- {value}px: {count} images"
-        for value, count in top_value_counts(analysis["rows"], "height")
-    ]
-    top_by_class_lines = []
-    for label in sorted(LABEL_NAMES):
-        label_rows = [row for row in analysis["rows"] if row["binary_label"] == label]
-        widths = ", ".join(f"{value}px ({count})" for value, count in top_value_counts(label_rows, "width"))
-        heights = ", ".join(f"{value}px ({count})" for value, count in top_value_counts(label_rows, "height"))
-        top_by_class_lines.append(f"- {LABEL_NAMES[label]} widths: {widths}")
-        top_by_class_lines.append(f"- {LABEL_NAMES[label]} heights: {heights}")
     threshold_lines = [
-        f"- Real images with minimum side below {item['threshold']}px: "
+        f"- {item['class_name']} images with minimum side below {item['threshold']}px: "
         f"{item['below']} / {item['total']} ({item['below_percent']:.2f}%)"
-        for item in real_min_side_counts(analysis["rows"])
+        for item in min_side_threshold_counts(analysis["rows"])
     ]
-    size_counts = target_size_counts(analysis["rows"])
-    small_keep_limit = ai_small_keep_limit(analysis["rows"])
-    size_lines = [
-        f"- Real target sizes: 270px = {size_counts[0][270]}, 320px = {size_counts[0][320]}",
-        f"- AI target sizes before balancing: 270px = {size_counts[1][270]}, 320px = {size_counts[1][320]}",
-    ]
-    if small_keep_limit is None:
-        size_lines.append("- AI 270px balancing limit: not applied")
+    size_counts = target_size_counts(
+        analysis["rows"],
+        small_size=small_size,
+        large_size=large_size,
+        size_threshold=size_threshold,
+    )
+    target_sizes = sorted(set(size_counts[0]) | set(size_counts[1]))
+    size_lines = []
+    for label, label_name in [(0, "Real"), (1, "AI")]:
+        counts_text = ", ".join(
+            f"{target_size}px = {size_counts[label][target_size]}"
+            for target_size in target_sizes
+        )
+        size_lines.append(f"- {label_name} target sizes: {counts_text}")
+    if small_size != large_size:
+        small_keep_limit = ai_small_keep_limit(
+            analysis["rows"],
+            small_size=small_size,
+            large_size=large_size,
+            size_threshold=size_threshold,
+        )
+        size_lines.append(f"- AI small-size balancing enabled in cleaning: {balance_ai_small}")
+        if balance_ai_small and small_keep_limit is not None:
+            size_lines.append(f"- AI small-size balancing limit: keep {small_keep_limit}")
+
+    if small_size == large_size:
+        cleaning_size_lines = [
+            f"- Target size: {small_size[0]}x{small_size[1]}",
+        ]
     else:
-        size_lines.append(f"- AI 270px balancing limit: keep {small_keep_limit}")
-    size_lines.append(f"- AI 270px balancing enabled in cleaning: {balance_ai_small}")
+        cleaning_size_lines = [
+            f"- Small target size: {small_size[0]}x{small_size[1]}",
+            f"- Large target size: {large_size[0]}x{large_size[1]}",
+            f"- Large-size threshold: both original dimensions >= {size_threshold}px",
+        ]
 
-    plot_lines = [
-        "- `class_distribution.png`: Binary class distribution.",
-        "- `source_class_distribution.png`: Original six-way source-class distribution.",
-        "- `image_size_distribution.png`: Encoded byte length and decoded width/height scatter.",
-        "- `image_dimensions_by_class.png`: Decoded dimensions colored by binary class.",
-        "- `top_dimension_values.png`: Three most common widths and heights.",
-        "- `top_dimension_values_by_class.png`: Three most common widths and heights per class.",
-        "- `real_min_side_thresholds.png`: Real images below 270px and 320px minimum side.",
-    ]
+    text = f"""# Cleaning Summary
 
-    text = f"""# Cleaning Statistics
-
-## Class Counts
+## Dataset
 {os.linesep.join(class_lines)}
+- Decode failures: {analysis["decode_failures"]}
 
-## Source-Class Counts
-{os.linesep.join(source_lines)}
-
-## Descriptive Statistics
+## Image Size Stats
 {os.linesep.join(stats_lines)}
 
-## Frequent Dimensions
-Widths:
-{os.linesep.join(top_width_lines)}
-
-Heights:
-{os.linesep.join(top_height_lines)}
-
-By binary class:
-{os.linesep.join(top_by_class_lines)}
-
-## Real Images Below Thresholds
+## Size By Class
+{os.linesep.join(class_size_signal_lines(analysis))}
 {os.linesep.join(threshold_lines)}
+
+## Cleaning Settings
+- Crop: deterministic center square crop
+- Resize interpolation: bicubic
+{os.linesep.join(cleaning_size_lines)}
 
 ## Cleaned-Size Buckets
 {os.linesep.join(size_lines)}
-
-## Class-Correlated Size Statistics
-{os.linesep.join(largest_class_gaps(analysis))}
-
-## Cleaning Parameters
-- Small target size: {small_size[0]}x{small_size[1]}
-- Large target size: {large_size[0]}x{large_size[1]}
-- Large-size threshold: both original dimensions >= {size_threshold}px
-- Crop: deterministic center square crop
-- Resize interpolation: bicubic
-- Decode failures: {analysis["decode_failures"]}
-- Output folder: `{cleaned_dir}`
-- Output format: `.npz`
-
-## NPZ Fields
-- `images`: uint8 array `(N, H, W, 3)`
-- `labels`: int8 binary label, 0 = real, 1 = ai_generated
-- `source_class`: int8 original source class
-- `source_file`: source parquet filename
-- `target_size`: int16 cleaned square size
-- `original_width`: int32 decoded source width
-- `original_height`: int32 decoded source height
-- `original_byte_length`: int32 encoded source byte length
-
-## Plot Captions
-{os.linesep.join(plot_lines)}
 """
     output_path.write_text(text)
 
@@ -641,11 +586,15 @@ def clean_training_data(
     balance_ai_small: bool = False,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_path in output_dir.glob("train_cleaned_*.npz"):
+        stale_path.unlink()
+    (output_dir / "manifest.csv").unlink(missing_ok=True)
+
     metadata_rows = []
     written_files = []
     small_key = small_size[0]
     ai_small_limit = None
-    if balance_ai_small:
+    if balance_ai_small and small_size != large_size:
         ai_small_limit = ai_small_keep_limit(
             analysis["rows"],
             small_size=small_size,
@@ -665,7 +614,6 @@ def clean_training_data(
                 "target_sizes": [],
                 "original_widths": [],
                 "original_heights": [],
-                "original_byte_lengths": [],
             },
             large_size[0]: {
                 "images": [],
@@ -675,7 +623,6 @@ def clean_training_data(
                 "target_sizes": [],
                 "original_widths": [],
                 "original_heights": [],
-                "original_byte_lengths": [],
             },
         }
         skipped = 0
@@ -713,7 +660,6 @@ def clean_training_data(
                 chunk["target_sizes"].append(target_size)
                 chunk["original_widths"].append(width)
                 chunk["original_heights"].append(height)
-                chunk["original_byte_lengths"].append(len(image_bytes))
             except (UnidentifiedImageError, OSError, ValueError):
                 skipped += 1
 
@@ -732,7 +678,6 @@ def clean_training_data(
                 target_size=np.asarray(chunk["target_sizes"], dtype=np.int16),
                 original_width=np.asarray(chunk["original_widths"], dtype=np.int32),
                 original_height=np.asarray(chunk["original_heights"], dtype=np.int32),
-                original_byte_length=np.asarray(chunk["original_byte_lengths"], dtype=np.int32),
             )
             written_files.append(output_path.name)
             parquet_written_files.append(output_path.name)
@@ -772,8 +717,7 @@ def clean_training_data(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout_seconds", type=int, default=600)
-    parser.add_argument("--small_size", type=int, default=DEFAULT_SMALL_IMAGE_SIZE[0])
-    parser.add_argument("--large_size", type=int, default=DEFAULT_LARGE_IMAGE_SIZE[0])
+    parser.add_argument("--image_size", type=int, default=DEFAULT_IMAGE_SIZE[0])
     parser.add_argument("--size_threshold", type=int, default=DEFAULT_SIZE_THRESHOLD)
     parser.add_argument("--balance_ai_small", action="store_true")
     parser.add_argument("--skip_cleaned_dataset", action="store_true")
@@ -783,8 +727,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     start_time = time.time()
-    small_size = (args.small_size, args.small_size)
-    large_size = (args.large_size, args.large_size)
+    small_size = (args.image_size, args.image_size)
+    large_size = (args.image_size, args.image_size)
     data_dir, artifacts_dir = project_paths()
     train_paths = train_parquet_paths(data_dir)
 
@@ -794,13 +738,15 @@ def main() -> int:
     print(f"Reading {len(train_paths)} train parquet files from {data_dir / 'train'}")
     analysis = analyze_training_data(train_paths)
     save_rows_csv(analysis["rows"], exploration_dir / "train_image_stats.csv")
+    for obsolete_plot in [
+        "top_dimension_values.png",
+        "top_dimension_values_by_class.png",
+    ]:
+        (exploration_dir / obsolete_plot).unlink(missing_ok=True)
     plot_class_distribution(analysis["class_counts"], exploration_dir / "class_distribution.png")
-    plot_source_distribution(analysis["source_class_counts"], exploration_dir / "source_class_distribution.png")
-    plot_image_size_distribution(analysis["rows"], exploration_dir / "image_size_distribution.png")
     plot_image_dimensions_by_class(analysis["rows"], exploration_dir / "image_dimensions_by_class.png")
-    plot_top_dimensions(analysis["rows"], exploration_dir / "top_dimension_values.png")
-    plot_top_dimensions_by_class(analysis["rows"], exploration_dir / "top_dimension_values_by_class.png")
-    plot_real_min_side_thresholds(analysis["rows"], exploration_dir / "real_min_side_thresholds.png")
+    plot_size_pairs_by_class(analysis["rows"], exploration_dir / "size_pairs_by_class.png")
+    plot_min_side_thresholds_by_class(analysis["rows"], exploration_dir / "min_side_thresholds_by_class.png")
 
     cleaned_dir = artifacts_dir / "cleaned_train_npz"
     clean_result = {
