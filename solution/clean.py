@@ -30,6 +30,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 
 LABEL_NAMES = {0: "real", 1: "ai_generated"}
+DISPLAY_LABEL_NAMES = {0: "Real", 1: "AI-generated"}
 SOURCE_CLASS_NAMES = {
     0: "real",
     1: "SD 2.1",
@@ -226,15 +227,26 @@ def plot_size_pairs_by_class(rows: list[dict], output_path: Path, limit: int = 6
         bars = ax.barh(y_positions, values, color=colors[label])
         ax.set_yticks(y_positions, labels)
         ax.invert_yaxis()
-        ax.set_title(f"{LABEL_NAMES[label]}: common original sizes")
+        ax.set_title(f"{DISPLAY_LABEL_NAMES[label]}: common original sizes")
         ax.set_xlabel("Share within class (%)")
         for bar, value, count in zip(bars, values, raw_counts):
+            label_text = f"{value:.1f}% (n={count})"
+            if value > 70:
+                text_x = bar.get_width() - 1.0
+                horizontal_alignment = "right"
+                text_color = "white"
+            else:
+                text_x = bar.get_width()
+                horizontal_alignment = "left"
+                text_color = "black"
             ax.text(
-                bar.get_width(),
+                text_x,
                 bar.get_y() + bar.get_height() / 2,
-                f" {value:.1f}% (n={count})",
+                label_text if horizontal_alignment == "right" else f" {label_text}",
                 va="center",
+                ha=horizontal_alignment,
                 fontsize=9,
+                color=text_color,
             )
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
@@ -360,6 +372,104 @@ def plot_min_side_thresholds_by_class(rows: list[dict], output_path: Path) -> No
     axes[0].set_yscale("symlog", linthresh=10)
     max_absolute = max(item["below"] for item in counts)
     axes[0].set_ylim(0, max_absolute * 1.6 if max_absolute else 1)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def update_reference_example(examples: dict[str, dict | None], record: dict) -> None:
+    width = record["width"]
+    height = record["height"]
+    crop_side = record["crop_side"]
+    label = record["label"]
+
+    if label == 0:
+        largest = examples["largest_real"]
+        smallest = examples["smallest_real"]
+        if largest is None or crop_side > largest["crop_side"]:
+            examples["largest_real"] = record
+        if smallest is None or crop_side < smallest["crop_side"]:
+            examples["smallest_real"] = record
+    elif width == 320 and height == 320 and examples["ai_320"] is None:
+        examples["ai_320"] = record
+    elif width == 270 and height == 270 and examples["ai_270"] is None:
+        examples["ai_270"] = record
+
+
+def find_reference_examples_from_npz(cleaned_dir: Path) -> dict[str, dict | None] | None:
+    npz_paths = sorted(cleaned_dir.glob("train_cleaned_*.npz"))
+    if not npz_paths:
+        print(f"Warning: no cleaned NPZ files found in {cleaned_dir}; skipping reference example plot.")
+        return None
+
+    examples: dict[str, dict | None] = {
+        "largest_real": None,
+        "smallest_real": None,
+        "ai_320": None,
+        "ai_270": None,
+    }
+
+    for npz_path in npz_paths:
+        with np.load(npz_path) as data:
+            images = data["images"]
+            labels = data["labels"]
+            original_widths = data["original_width"]
+            original_heights = data["original_height"]
+            for i in range(len(labels)):
+                width = int(original_widths[i])
+                height = int(original_heights[i])
+                record = {
+                    "image": np.asarray(images[i]).copy(),
+                    "file": npz_path.name,
+                    "label": int(labels[i]),
+                    "width": width,
+                    "height": height,
+                    "crop_side": min(width, height),
+                }
+                update_reference_example(examples, record)
+
+        if all(examples.values()) and examples["largest_real"]["crop_side"] == 640:
+            break
+
+    return examples
+
+
+def plot_cropped_reference_examples(
+    cleaned_dir: Path,
+    output_path: Path,
+) -> None:
+    examples = find_reference_examples_from_npz(cleaned_dir)
+    if examples is None:
+        return
+
+    titles = [
+        ("largest_real", "Largest real after crop"),
+        ("smallest_real", "Smallest real after crop/resize"),
+        ("ai_320", "AI 320px original after crop"),
+        ("ai_270", "AI 270px original after crop"),
+    ]
+
+    fig, axes = plt.subplots(1, 4, figsize=(12, 3.6))
+    for ax, (key, title) in zip(axes, titles):
+        example = examples[key]
+        ax.axis("off")
+        if example is None:
+            ax.text(0.5, 0.5, "No matching image", ha="center", va="center", wrap=True)
+            ax.set_title(title, fontsize=10)
+            continue
+
+        image = Image.fromarray(example["image"])
+        ax.imshow(image)
+        ax.set_title(title, fontsize=10)
+        ax.text(
+            0.5,
+            -0.08,
+            f"{example['width']}x{example['height']} -> {image.width}x{image.height}",
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=9,
+        )
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -734,6 +844,7 @@ def main() -> int:
 
     exploration_dir = artifacts_dir / "clean_exploration"
     exploration_dir.mkdir(parents=True, exist_ok=True)
+    cleaned_dir = artifacts_dir / "cleaned_train_npz"
 
     print(f"Reading {len(train_paths)} train parquet files from {data_dir / 'train'}")
     analysis = analyze_training_data(train_paths)
@@ -747,8 +858,11 @@ def main() -> int:
     plot_image_dimensions_by_class(analysis["rows"], exploration_dir / "image_dimensions_by_class.png")
     plot_size_pairs_by_class(analysis["rows"], exploration_dir / "size_pairs_by_class.png")
     plot_min_side_thresholds_by_class(analysis["rows"], exploration_dir / "min_side_thresholds_by_class.png")
+    plot_cropped_reference_examples(
+        cleaned_dir,
+        exploration_dir / "cropped_reference_examples.png",
+    )
 
-    cleaned_dir = artifacts_dir / "cleaned_train_npz"
     clean_result = {
         "skipped": True,
         "output_dir": str(cleaned_dir),
