@@ -41,6 +41,50 @@ artifacts/task02/metrics.json
 artifacts/task02/predictions.csv
 ```
 
+## Engineered-Feature Task 2 Alternative
+
+The classical alternative derives its inputs only from the cleaned RGB pixels.
+It does not use image dimensions, aspect ratio, encoded size, or file format.
+The implementation is original code inspired by published methods; it does not
+include third-party source code.
+
+Every cleaned pixel is covered by an exhaustive 8x8 grid of native-resolution
+32x32 patches, so the image is not reduced to or cropped into a single 32x32
+region. The 836 retained features pool patch color, residual, texture, and
+three-lowest-bit-plane statistics across the entire image, compare its
+texture-rich and texture-poor patches, and add four block-boundary signals.
+These choices are
+inspired by [PatchCraft](https://arxiv.org/abs/2311.12397),
+[LOTA](https://openaccess.thecvf.com/content/ICCV2025/html/Wang_LOTA_Bit-Planes_Guided_AI-Generated_Image_Detection_ICCV_2025_paper.html).
+Unused global, HOG/LBP/GLCM/wavelet, and periodic-spectrum branches were removed
+after the selected model was shown not to consume them. The
+classifier is a deterministic, binary-class-balanced 600-tree Extra Trees
+ensemble. Its decision threshold is selected only from real calibration scores
+with a tie-safe Neyman-Pearson order statistic and checked with one-sided Wilson
+and exact Clopper-Pearson FPR bounds. Validation data never selects the model or
+threshold.
+
+Run it after `clean.py`:
+
+```bash
+python prepare_features.py --timeout_seconds 600
+python train_features.py --timeout_seconds 1800
+python predict_features.py --timeout_seconds 600
+```
+
+Its prepared features, model, calibration threshold, and metrics are written to:
+
+```text
+artifacts/prepared/task02_features/
+artifacts/task02_features/model.joblib
+artifacts/task02_features/threshold.json
+artifacts/task02_features/metrics.json
+artifacts/task02_features/arguments.json
+```
+
+Like the CNN pipeline, inference writes the required submission file to
+`artifacts/task02/predictions.csv`. Running either predictor replaces that file.
+
 # Hyperparameter Runs
 
 For report comparisons, each `train.py` run is archived under `artifacts/task02/runs/` and summarized in:
