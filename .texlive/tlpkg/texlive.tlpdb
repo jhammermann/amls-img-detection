@@ -1,0 +1,6 @@
+name 00texlive.installation
+category TLCore
+depend opt_location:https://mirror.ctan.org/systems/texlive/tlnet
+depend setting_available_architectures:
+depend setting_usertree:1
+
