@@ -260,7 +260,7 @@ def main() -> int:
     real_contrasts = np.concatenate(
         [contrasts[name][calibration_domains[name][1] == 0] for name in calibration_domains]
     )
-    quality_edges = np.quantile(real_contrasts, np.linspace(0, 1, 3))
+    quality_edges = np.quantile(real_contrasts, (0.0, 0.475, 1.0))
     quality_edges[0], quality_edges[-1] = -np.inf, np.inf
     quality_thresholds = []
     for lower, upper in zip(quality_edges[:-1], quality_edges[1:]):
