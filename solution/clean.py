@@ -165,24 +165,6 @@ def analyze_training_data(parquet_paths: list[Path]) -> dict:
     }
 
 
-def save_rows_csv(rows: list[dict], output_path: Path) -> None:
-    fieldnames = [
-        "file",
-        "source_class",
-        "source_class_name",
-        "binary_label",
-        "class_name",
-        "width",
-        "height",
-        "aspect_ratio",
-        "format",
-    ]
-    with output_path.open("w", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def plot_class_distribution(class_counts: dict[int, int], output_path: Path) -> None:
     labels = sorted(class_counts)
     counts = np.array([class_counts[label] for label in labels], dtype=float)
@@ -544,122 +526,6 @@ def ai_small_keep_limit(
     return min(ai_small, int(ai_large * real_small / real_large))
 
 
-def class_size_signal_lines(analysis: dict) -> list[str]:
-    by_class = analysis["by_class"]
-    if "0" not in by_class or "1" not in by_class:
-        return ["- Only one class was found, so class-separating characteristics cannot be compared."]
-
-    notes = []
-    for metric in ["width", "height", "aspect_ratio"]:
-        stats_0 = by_class["0"].get(metric, {})
-        stats_1 = by_class["1"].get(metric, {})
-        if not stats_0 or not stats_1:
-            continue
-        med_0 = stats_0["median"]
-        med_1 = stats_1["median"]
-        denominator = max(abs(med_0), abs(med_1), 1)
-        relative_gap = abs(med_1 - med_0) / denominator
-        notes.append(
-            f"- `{metric}` median: class 0 = {med_0}, class 1 = {med_1} "
-            f"(relative gap {relative_gap:.1%})."
-        )
-    return notes
-
-
-def compact_stats(stats: dict[str, float]) -> str:
-    return (
-        f"median {stats['median']}, p05 {stats['p05']}, "
-        f"p95 {stats['p95']}, range {stats['min']}..{stats['max']}"
-    )
-
-
-def write_report(
-    analysis: dict,
-    output_path: Path,
-    cleaned_dir: Path,
-    small_size: tuple[int, int],
-    large_size: tuple[int, int],
-    size_threshold: int,
-    balance_ai_small: bool,
-) -> None:
-    total = sum(analysis["class_counts"].values())
-    class_lines = []
-    for label, count in sorted(analysis["class_counts"].items()):
-        class_lines.append(
-            f"- Class {label} (`{LABEL_NAMES.get(label, label)}`): "
-            f"{count} rows ({100 * count / total:.2f}%)"
-        )
-
-    stats_lines = [
-        f"- Width: {compact_stats(analysis['overall']['width'])}",
-        f"- Height: {compact_stats(analysis['overall']['height'])}",
-        f"- Aspect ratio: {compact_stats(analysis['overall']['aspect_ratio'])}",
-    ]
-    threshold_lines = [
-        f"- {item['class_name']} images with minimum side below {item['threshold']}px: "
-        f"{item['below']} / {item['total']} ({item['below_percent']:.2f}%)"
-        for item in min_side_threshold_counts(analysis["rows"])
-    ]
-    size_counts = target_size_counts(
-        analysis["rows"],
-        small_size=small_size,
-        large_size=large_size,
-        size_threshold=size_threshold,
-    )
-    target_sizes = sorted(set(size_counts[0]) | set(size_counts[1]))
-    size_lines = []
-    for label, label_name in [(0, "Real"), (1, "AI")]:
-        counts_text = ", ".join(
-            f"{target_size}px = {size_counts[label][target_size]}"
-            for target_size in target_sizes
-        )
-        size_lines.append(f"- {label_name} target sizes: {counts_text}")
-    if small_size != large_size:
-        small_keep_limit = ai_small_keep_limit(
-            analysis["rows"],
-            small_size=small_size,
-            large_size=large_size,
-            size_threshold=size_threshold,
-        )
-        size_lines.append(f"- AI small-size balancing enabled in cleaning: {balance_ai_small}")
-        if balance_ai_small and small_keep_limit is not None:
-            size_lines.append(f"- AI small-size balancing limit: keep {small_keep_limit}")
-
-    if small_size == large_size:
-        cleaning_size_lines = [
-            f"- Target size: {small_size[0]}x{small_size[1]}",
-        ]
-    else:
-        cleaning_size_lines = [
-            f"- Small target size: {small_size[0]}x{small_size[1]}",
-            f"- Large target size: {large_size[0]}x{large_size[1]}",
-            f"- Large-size threshold: both original dimensions >= {size_threshold}px",
-        ]
-
-    text = f"""# Cleaning Summary
-
-## Dataset
-{os.linesep.join(class_lines)}
-- Decode failures: {analysis["decode_failures"]}
-
-## Image Size Stats
-{os.linesep.join(stats_lines)}
-
-## Size By Class
-{os.linesep.join(class_size_signal_lines(analysis))}
-{os.linesep.join(threshold_lines)}
-
-## Cleaning Settings
-- Crop: deterministic center square crop
-- Resize interpolation: bicubic
-{os.linesep.join(cleaning_size_lines)}
-
-## Cleaned-Size Buckets
-{os.linesep.join(size_lines)}
-"""
-    output_path.write_text(text)
-
-
 def center_crop_to_aspect(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
     source_width, source_height = image.size
     target_ratio = target_width / target_height
@@ -848,12 +714,6 @@ def main() -> int:
 
     print(f"Reading {len(train_paths)} train parquet files from {data_dir / 'train'}")
     analysis = analyze_training_data(train_paths)
-    save_rows_csv(analysis["rows"], exploration_dir / "train_image_stats.csv")
-    for obsolete_plot in [
-        "top_dimension_values.png",
-        "top_dimension_values_by_class.png",
-    ]:
-        (exploration_dir / obsolete_plot).unlink(missing_ok=True)
     plot_class_distribution(analysis["class_counts"], exploration_dir / "class_distribution.png")
     plot_image_dimensions_by_class(analysis["rows"], exploration_dir / "image_dimensions_by_class.png")
     plot_size_pairs_by_class(analysis["rows"], exploration_dir / "size_pairs_by_class.png")
@@ -882,15 +742,6 @@ def main() -> int:
             balance_ai_small=args.balance_ai_small,
         )
 
-    write_report(
-        analysis,
-        exploration_dir / "clean_report.md",
-        cleaned_dir,
-        small_size=small_size,
-        large_size=large_size,
-        size_threshold=args.size_threshold,
-        balance_ai_small=args.balance_ai_small,
-    )
     summary = {
         "class_counts": analysis["class_counts"],
         "source_class_counts": analysis["source_class_counts"],

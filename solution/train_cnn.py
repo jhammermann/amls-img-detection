@@ -271,7 +271,7 @@ def main() -> int:
     calibration_scores, calibration_labels = predict_npz(
         model, prepared_dir / "calibration.npz", args.batch_size, args.image_size, device
     )
-    threshold = threshold_at_fpr(calibration_scores, calibration_labels, max_fpr=0.20)
+    threshold = threshold_at_fpr(calibration_scores, calibration_labels, max_fpr=0.18)
     validation_scores, validation_labels = predict_npz(
         model, prepared_dir / "validation.npz", args.batch_size, args.image_size, device
     )
@@ -287,9 +287,9 @@ def main() -> int:
         "seconds": round(time.time() - start_time, 2),
         "args": vars(args),
     }
-    save_json(task_dir / "threshold.json", {"threshold": threshold, "max_fpr": 0.20})
+    save_json(task_dir / "threshold.json", {"threshold": threshold, "max_fpr": 0.18})
     save_json(task_dir / "metrics.json", metrics)
-    save_json(run_dir / "threshold.json", {"threshold": threshold, "max_fpr": 0.20})
+    save_json(run_dir / "threshold.json", {"threshold": threshold, "max_fpr": 0.18})
     save_json(run_dir / "metrics.json", metrics)
     for history_path in [task_dir / "train_history.csv", run_dir / "train_history.csv"]:
         with history_path.open("w", newline="") as csv_file:

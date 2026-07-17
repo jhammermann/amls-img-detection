@@ -61,7 +61,7 @@ def parquet_rows(split_dir: Path, columns: list[str]):
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:
-        raise SystemExit("prepare_features.py needs pyarrow from requirements.txt.") from exc
+        raise SystemExit("prepare.py needs pyarrow from requirements.txt.") from exc
 
     parquet_paths = sorted(split_dir.glob("*.parquet"))
     if not parquet_paths:

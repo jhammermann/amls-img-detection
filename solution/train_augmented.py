@@ -13,10 +13,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
-import prepare_features
+import prepare
 from clean import DEFAULT_IMAGE_SIZE, clean_image_bytes
-from prepare_features import atomic_save_npz, extract_many, prepare_labeled_split
-from train_features import (
+from prepare import atomic_save_npz, extract_many, prepare_labeled_split
+from train import (
+    AveragingTreeEnsemble,
     atomic_dump,
     atomic_write_json,
     balanced_sample_weights,
@@ -35,10 +36,11 @@ OPERATION_PROBABILITIES = (0.10, 0.10, 0.15, 0.20, 0.20, 0.10, 0.075, 0.075)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout_seconds", type=int, default=1800)
-    parser.add_argument("--n_estimators", type=int, default=300)
+    parser.add_argument("--n_estimators", type=int, default=600)
     parser.add_argument("--min_samples_leaf", type=int, default=2)
-    parser.add_argument("--max_features", type=float, default=0.35)
-    parser.add_argument("--augmented_views", type=int, default=3)
+    parser.add_argument("--max_features", type=float, default=0.20)
+    parser.add_argument("--augmented_views", type=int, default=2)
+    parser.add_argument("--adaptation_copies", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -86,7 +88,7 @@ def run_feature_preparation(timeout_seconds: int) -> None:
     original_argv = sys.argv
     try:
         sys.argv = [original_argv[0], "--timeout_seconds", str(timeout_seconds)]
-        prepare_features.main()
+        prepare.main()
     finally:
         sys.argv = original_argv
 
@@ -142,7 +144,7 @@ def prepare_augmented_features(
                     outputs.append(name)
             row_offset += len(labels)
 
-        data_dir, _ = prepare_features.paths()
+        data_dir, _ = prepare.paths()
         calibration = prepare_labeled_split(
             data_dir, output_dir, "calibration_augmented", deadline
         )
@@ -190,11 +192,82 @@ def empirical_threshold(scores: np.ndarray, labels: np.ndarray, target_fpr: floa
     }
 
 
+def constrained_quality_thresholds(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    bins: np.ndarray,
+    bin_count: int,
+    base_bin_fpr: float = 0.194,
+    overall_fpr: float = 0.195,
+    maximum_bin_fpr: float = 0.20,
+    maximum_relaxed_bins: int = 1,
+) -> tuple[list[float], dict]:
+    """Spend a small pooled FPR allowance where calibration recall gains most."""
+
+    options = []
+    real_total = int(np.count_nonzero(labels == 0))
+    overall_budget = int(np.floor(overall_fpr * real_total))
+    for bin_index in range(bin_count):
+        selected = bins == bin_index
+        bin_scores = scores[selected]
+        bin_labels = labels[selected]
+        real_scores = np.sort(bin_scores[bin_labels == 0])
+        minimum_allowed = int(np.floor(base_bin_fpr * len(real_scores)))
+        maximum_allowed = int(np.floor(maximum_bin_fpr * len(real_scores)))
+        bin_options = {}
+        for allowed in range(minimum_allowed, maximum_allowed + 1):
+            threshold = (
+                np.inf
+                if allowed == 0
+                else float(np.nextafter(real_scores[-allowed], np.inf))
+            )
+            false_positives = int(np.count_nonzero(real_scores >= threshold))
+            true_positives = int(
+                np.count_nonzero(bin_scores[bin_labels == 1] >= threshold)
+            )
+            option_key = (false_positives, int(allowed > minimum_allowed))
+            previous = bin_options.get(option_key)
+            if previous is None or true_positives > previous[0]:
+                bin_options[option_key] = (true_positives, threshold)
+        options.append(bin_options)
+
+    states = {(0, 0): (0, [])}
+    for bin_options in options:
+        new_states = {}
+        for (used, relaxed), (true_positives, thresholds) in states.items():
+            for (false_positives, is_relaxed), (gain, threshold) in bin_options.items():
+                total = used + false_positives
+                total_relaxed = relaxed + is_relaxed
+                if total > overall_budget or total_relaxed > maximum_relaxed_bins:
+                    continue
+                candidate = (true_positives + gain, thresholds + [threshold])
+                key = (total, total_relaxed)
+                if key not in new_states or candidate[0] > new_states[key][0]:
+                    new_states[key] = candidate
+        states = new_states
+    if not states:
+        raise RuntimeError("No quality thresholds satisfy the calibration FPR limits.")
+    (observed_false_positives, relaxed_bins), (true_positives, thresholds) = max(
+        states.items(), key=lambda item: (item[1][0], item[0])
+    )
+    return thresholds, {
+        "base_bin_fpr": base_bin_fpr,
+        "maximum_bin_fpr": maximum_bin_fpr,
+        "overall_target_fpr": overall_fpr,
+        "maximum_relaxed_bins": maximum_relaxed_bins,
+        "relaxed_bins": relaxed_bins,
+        "real_rows": real_total,
+        "observed_false_positives": observed_false_positives,
+        "observed_fpr": observed_false_positives / real_total,
+        "calibration_true_positives": true_positives,
+    }
+
+
 def image_contrasts(data_dir: Path, split: str) -> np.ndarray:
     """Measure luminance contrast after the same cleaning used at inference."""
 
     values = []
-    for row in prepare_features.parquet_rows(data_dir / split, ["image"]):
+    for row in prepare.parquet_rows(data_dir / split, ["image"]):
         image = clean_image_bytes(row["image"], DEFAULT_IMAGE_SIZE).astype(np.float32)
         luminance = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
         values.append(float(luminance.std()))
@@ -209,6 +282,8 @@ def main() -> int:
         raise SystemExit("max features must lie in (0, 1]")
     if not 1 <= args.augmented_views <= len(OPERATIONS):
         raise SystemExit(f"augmented views must be between 1 and {len(OPERATIONS)}")
+    if args.adaptation_copies < 0:
+        raise SystemExit("--adaptation_copies cannot be negative")
     started = time.time()
     root = Path(__file__).resolve().parent
     artifacts = root / "artifacts"
@@ -226,24 +301,70 @@ def main() -> int:
     train_x = np.concatenate((clean_x, augmented_x))
     train_y = np.concatenate((clean_y, augmented_y))
     train_source = np.concatenate((clean_source, augmented_source))
+    calibration_augmented_indices = np.arange(len(calibration_augmented[1]))
+    adaptation_rows = 0
+    adaptation_folds = None
+    if args.adaptation_copies:
+        adaptation_mask = np.zeros(len(calibration_augmented[1]), dtype=bool)
+        for source in np.unique(calibration_augmented[2]):
+            source_indices = np.flatnonzero(calibration_augmented[2] == source)
+            adaptation_mask[source_indices[::2]] = True
+        adaptation_folds = (adaptation_mask, ~adaptation_mask)
+        adaptation_rows = int(len(calibration_augmented[1]) * args.adaptation_copies)
 
     from sklearn.ensemble import ExtraTreesClassifier
 
     _, class_weights = balanced_sample_weights(train_y)
-    model = ExtraTreesClassifier(
-        n_estimators=args.n_estimators,
-        max_features=args.max_features,
-        min_samples_leaf=args.min_samples_leaf,
-        class_weight={int(label): weight for label, weight in class_weights.items()},
-        n_jobs=8,
-        random_state=args.seed,
-    )
-    model.fit(train_x, train_y)
-    model.set_params(n_jobs=1)
+    if adaptation_folds is not None:
+        models = []
+        trees_per_fold = max(1, args.n_estimators // 2)
+        for fold_index, fold_mask in enumerate(adaptation_folds):
+            fold_x = np.concatenate(
+                (
+                    train_x,
+                    np.repeat(
+                        calibration_augmented[0][fold_mask],
+                        args.adaptation_copies,
+                        axis=0,
+                    ),
+                )
+            )
+            fold_y = np.concatenate(
+                (
+                    train_y,
+                    np.repeat(
+                        calibration_augmented[1][fold_mask], args.adaptation_copies
+                    ),
+                )
+            )
+            fold_model = ExtraTreesClassifier(
+                n_estimators=trees_per_fold,
+                max_features=args.max_features,
+                min_samples_leaf=args.min_samples_leaf,
+                class_weight="balanced",
+                n_jobs=8,
+                random_state=args.seed + fold_index,
+            )
+            fold_model.fit(fold_x, fold_y)
+            models.append(fold_model)
+        model = AveragingTreeEnsemble(models)
+    else:
+        model = ExtraTreesClassifier(
+            n_estimators=args.n_estimators,
+            max_features=args.max_features,
+            min_samples_leaf=args.min_samples_leaf,
+            class_weight={int(label): weight for label, weight in class_weights.items()},
+            n_jobs=8,
+            random_state=args.seed,
+        )
+        model.fit(train_x, train_y)
+    if "n_jobs" in model.get_params():
+        model.set_params(n_jobs=1)
+    model_iterations = len(model.estimators_)
 
     task_dir = artifacts / "task03_features"
     task_dir.mkdir(parents=True, exist_ok=True)
-    atomic_dump(task_dir / "model.joblib", model_bundle(model, args, len(model.estimators_)))
+    atomic_dump(task_dir / "model.joblib", model_bundle(model, args, model_iterations))
     schema = json.loads((prepared_task2 / "schema.json").read_text())
     atomic_write_json(task_dir / "schema.json", schema)
 
@@ -251,37 +372,52 @@ def main() -> int:
         "calibration": splits["calibration"],
         "calibration_augmented": calibration_augmented,
     }
-    data_dir, _ = prepare_features.paths()
+    data_dir, _ = prepare.paths()
     scores = {
         name: predict_scores(model, features)
         for name, (features, _, _) in calibration_domains.items()
     }
+    if adaptation_folds is not None:
+        out_of_fold_scores = np.empty(len(calibration_augmented[1]), dtype=np.float64)
+        for fold_index, fold_mask in enumerate(adaptation_folds):
+            held_out_model = model.models[1 - fold_index]
+            out_of_fold_scores[fold_mask] = predict_scores(
+                held_out_model, calibration_augmented[0][fold_mask]
+            )
+        scores["calibration_augmented"] = out_of_fold_scores
     contrasts = {name: image_contrasts(data_dir, name) for name in calibration_domains}
+    contrasts["calibration_augmented"] = contrasts["calibration_augmented"][
+        calibration_augmented_indices
+    ]
     real_contrasts = np.concatenate(
         [contrasts[name][calibration_domains[name][1] == 0] for name in calibration_domains]
     )
-    quality_edges = np.quantile(real_contrasts, (0.0, 0.475, 1.0))
+    quality_edges = np.quantile(real_contrasts, np.linspace(0.0, 1.0, 5))
     quality_edges[0], quality_edges[-1] = -np.inf, np.inf
-    quality_thresholds = []
-    for lower, upper in zip(quality_edges[:-1], quality_edges[1:]):
-        bin_scores, bin_labels = [], []
-        for name, (_, labels, _) in calibration_domains.items():
-            selected = (contrasts[name] >= lower) & (contrasts[name] < upper)
-            bin_scores.append(scores[name][selected])
-            bin_labels.append(labels[selected])
-        quality_thresholds.append(
-            empirical_threshold(np.concatenate(bin_scores), np.concatenate(bin_labels))["threshold"]
-        )
+    calibration_scores = np.concatenate([scores[name] for name in calibration_domains])
+    calibration_labels = np.concatenate(
+        [values[1] for values in calibration_domains.values()]
+    )
+    calibration_contrasts = np.concatenate(
+        [contrasts[name] for name in calibration_domains]
+    )
+    calibration_bins = np.digitize(calibration_contrasts, quality_edges[1:-1])
+    quality_thresholds, threshold_budget = constrained_quality_thresholds(
+        calibration_scores,
+        calibration_labels,
+        calibration_bins,
+        len(quality_edges) - 1,
+    )
     threshold_info = {
         "complete": True,
-        "method": "two_bin_quality_aware_empirical_threshold",
+        "method": "four_bin_constrained_recall_optimized_threshold",
         "threshold": 0.0,
         "quality_metric": "cleaned_luminance_std",
         "quality_edges": quality_edges.tolist(),
         "quality_thresholds": quality_thresholds,
-        "calibration_target_fpr": 0.19,
-        "feature_version": prepare_features.FEATURE_VERSION,
-        "model_estimators": len(model.estimators_),
+        "calibration_budget": threshold_budget,
+        "feature_version": prepare.FEATURE_VERSION,
+        "model_estimators": model_iterations,
     }
     atomic_write_json(task_dir / "threshold.json", threshold_info)
 
@@ -300,6 +436,7 @@ def main() -> int:
         "training_rows": int(len(train_y)),
         "clean_training_rows": int(len(clean_y)),
         "augmented_training_rows": int(len(augmented_y)),
+        "adaptation_training_rows": adaptation_rows,
         "augmentation": augmentation,
         "threshold_calibration": threshold_info,
         **evaluation,

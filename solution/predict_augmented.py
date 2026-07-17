@@ -10,7 +10,7 @@ import time
 import numpy as np
 
 from clean import DEFAULT_IMAGE_SIZE, clean_image_bytes
-from predict_features import (
+from predict import (
     parse_args,
     parquet_rows,
     paths,
@@ -37,7 +37,8 @@ def main() -> int:
     if threshold_info.get("model_estimators") != bundle.get("iteration"):
         raise RuntimeError("Task 3 model and threshold do not belong together.")
     model = bundle["model"]
-    model.set_params(n_jobs=1)
+    if "n_jobs" in model.get_params():
+        model.set_params(n_jobs=1)
     quality_edges = np.asarray(threshold_info["quality_edges"], dtype=np.float64)
     quality_thresholds = np.asarray(threshold_info["quality_thresholds"], dtype=np.float64)
 

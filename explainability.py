@@ -1,21 +1,21 @@
-"""Task 3 error analysis and local explanations for the Extra Trees model.
+"""Error analysis and local explanations for the Extra Trees models.
 
 This script is intentionally separate from training: explainability artifacts are
-report outputs and are not needed by the timed prediction pipeline.  It creates
-an image grid for all four confusion-matrix outcomes and Tree SHAP plots that
-decompose representative AI scores into per-feature contributions.
+report outputs and are not needed by the timed prediction pipeline. It creates
+the Tree SHAP feature-group plots used in the report.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent
+_ROOT = Path(__file__).resolve().parent / "solution"
+sys.path.insert(0, str(_ROOT))
 _CACHE_ROOT = _ROOT / "artifacts" / "cache"
 _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_CACHE_ROOT / "matplotlib"))
@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from clean import DEFAULT_IMAGE_SIZE, clean_image_bytes
-from prepare_features import FEATURE_NAMES, FEATURE_VERSION
+from prepare import FEATURE_NAMES, FEATURE_VERSION
 
 
 GROUPS = (
@@ -36,12 +36,6 @@ GROUPS = (
     ("False Negatives", 1, 0, True),
     ("True Positives", 1, 1, False),
     ("True Negatives", 0, 0, True),
-)
-FEATURE_FAMILIES = (
-    ("Patch statistics", "patch_all_"),
-    ("Texture contrast", "texture_contrast_"),
-    ("Low-bit patterns", "lowbit_"),
-    ("Compression blocks", "compression_"),
 )
 
 
@@ -59,17 +53,10 @@ class Example:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate Task 3 error grids and Tree SHAP decision explanations."
-    )
+    parser = argparse.ArgumentParser(description="Generate the report's Tree SHAP explanations.")
     parser.add_argument("--split", default="validation_augmented")
+    parser.add_argument("--task", choices=("task02", "task03"), default="task03")
     parser.add_argument("--examples_per_group", type=int, default=5)
-    parser.add_argument("--shap_features", type=int, default=8)
-    parser.add_argument(
-        "--skip_shap",
-        action="store_true",
-        help="Create only the confusion-outcome image grid.",
-    )
     return parser.parse_args()
 
 
@@ -82,18 +69,18 @@ def paths() -> tuple[Path, Path]:
     return data_dir, artifacts_dir
 
 
-def load_task3(artifacts_dir: Path, split: str):
+def load_model(artifacts_dir: Path, task: str, split: str):
     try:
         import joblib
     except ImportError as exc:
         raise SystemExit("explainability.py needs scikit-learn from requirements.txt") from exc
 
-    model_dir = artifacts_dir / "task03_features"
+    model_dir = artifacts_dir / f"{task}_features"
     bundle = joblib.load(model_dir / "model.joblib")
     if bundle.get("feature_version") != FEATURE_VERSION:
-        raise RuntimeError("The Task 3 model does not match the current feature extractor.")
+        raise RuntimeError(f"The {task} model does not match the current feature extractor.")
     if bundle.get("feature_names") != list(FEATURE_NAMES):
-        raise RuntimeError("The Task 3 model and feature names do not match.")
+        raise RuntimeError(f"The {task} model and feature names do not match.")
     model = bundle["model"]
     model.set_params(n_jobs=1)
 
@@ -101,7 +88,7 @@ def load_task3(artifacts_dir: Path, split: str):
     threshold = float(threshold_payload["threshold"])
     prepared_path = artifacts_dir / "prepared" / "task02_features" / f"{split}.npz"
     if not prepared_path.exists():
-        raise FileNotFoundError(f"Missing {prepared_path}; run prepare_features.py first.")
+        raise FileNotFoundError(f"Missing {prepared_path}; run prepare.py first.")
     with np.load(prepared_path) as prepared:
         features = prepared["features"].astype(np.float32)
         labels = prepared["labels"].astype(np.int8)
@@ -209,72 +196,6 @@ def load_selected_images(
     return examples
 
 
-def write_examples_csv(path: Path, examples: dict[str, list[Example]]) -> None:
-    with path.open("w", newline="") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(
-            [
-                "row_index",
-                "row_id",
-                "source_class",
-                "true_label",
-                "predicted_label",
-                "score",
-                "threshold",
-                "group",
-            ]
-        )
-        for name, *_ in GROUPS:
-            for example in examples[name]:
-                writer.writerow(
-                    [
-                        example.index,
-                        example.row_id,
-                        example.source_class,
-                        example.true_label,
-                        example.predicted_label,
-                        example.score,
-                        example.threshold,
-                        example.group,
-                    ]
-                )
-
-
-def plot_error_grid(
-    path: Path,
-    examples: dict[str, list[Example]],
-    per_group: int,
-) -> None:
-    fig, axes = plt.subplots(
-        len(GROUPS), per_group, figsize=(2.55 * per_group, 9.7), squeeze=False
-    )
-    for row, (name, *_unused) in enumerate(GROUPS):
-        group_examples = examples[name]
-        for column in range(per_group):
-            ax = axes[row, column]
-            ax.set_xticks([])
-            ax.set_yticks([])
-            if column < len(group_examples):
-                example = group_examples[column]
-                ax.imshow(example.image)
-                ax.set_title(
-                    f"row {example.row_id} | score={example.score:.3f}\nsource={example.source_class}",
-                    fontsize=9,
-                )
-            else:
-                ax.text(0.5, 0.5, "No example", ha="center", va="center")
-            if column == 0:
-                ax.set_ylabel(name, fontsize=12, fontweight="bold", labelpad=14)
-    fig.suptitle(
-        f"Task 3 {path.stem.removesuffix('_errors_vs_correct_grid').replace('_', ' ')} outcomes "
-        "(each image uses its contrast-bin threshold)",
-        fontsize=13,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    fig.savefig(path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-
 def positive_class_shap(model, features: np.ndarray) -> tuple[np.ndarray, float]:
     """Return exact Tree SHAP contributions for the AI-class probability."""
 
@@ -285,113 +206,35 @@ def positive_class_shap(model, features: np.ndarray) -> tuple[np.ndarray, float]
             "Tree SHAP explanations need shap; install solution/requirements.txt."
         ) from exc
 
-    positive_index = int(np.flatnonzero(np.asarray(model.classes_) == 1)[0])
-    explainer = shap.TreeExplainer(
-        model, feature_perturbation="tree_path_dependent", model_output="raw"
-    )
-    raw_values = explainer.shap_values(features, check_additivity=True)
-    if isinstance(raw_values, list):
-        values = np.asarray(raw_values[positive_index], dtype=np.float64)
-    else:
-        values_array = np.asarray(raw_values, dtype=np.float64)
-        values = (
-            values_array[:, :, positive_index]
-            if values_array.ndim == 3
-            else values_array
+    def explain_tree_ensemble(tree_model) -> tuple[np.ndarray, float]:
+        positive_index = int(np.flatnonzero(np.asarray(tree_model.classes_) == 1)[0])
+        explainer = shap.TreeExplainer(
+            tree_model, feature_perturbation="tree_path_dependent", model_output="raw"
         )
-    expected = np.asarray(explainer.expected_value, dtype=np.float64)
-    base_value = float(expected.reshape(-1)[positive_index] if expected.size > 1 else expected.item())
-    return values, base_value
-
-
-def shorten_feature_name(name: str, limit: int = 48) -> str:
-    for prefix in ("patch_all_", "texture_contrast_", "lowbit_", "compression_"):
-        if name.startswith(prefix):
-            name = name[len(prefix) :]
-            break
-    return name if len(name) <= limit else f"{name[: limit - 1]}…"
-
-
-def plot_tree_shap_decisions(
-    path: Path,
-    examples: dict[str, list[Example]],
-    features: np.ndarray,
-    model,
-    max_features: int,
-) -> tuple[list[dict], float, float]:
-    representatives = [examples[name][0] for name, *_ in GROUPS if examples[name]]
-    selected_features = features[[example.index for example in representatives]]
-    shap_values, base_value = positive_class_shap(model, selected_features)
-    reconstructed = base_value + shap_values.sum(axis=1)
-    scores = np.array([example.score for example in representatives])
-    maximum_error = float(np.max(np.abs(reconstructed - scores)))
-    if maximum_error > 1e-5:
-        raise RuntimeError(
-            f"Tree SHAP additivity check failed (maximum error {maximum_error:g})."
+        raw_values = explainer.shap_values(features, check_additivity=True)
+        if isinstance(raw_values, list):
+            values = np.asarray(raw_values[positive_index], dtype=np.float64)
+        else:
+            values_array = np.asarray(raw_values, dtype=np.float64)
+            values = (
+                values_array[:, :, positive_index]
+                if values_array.ndim == 3
+                else values_array
+            )
+        expected = np.asarray(explainer.expected_value, dtype=np.float64)
+        base_value = float(
+            expected.reshape(-1)[positive_index]
+            if expected.size > 1
+            else expected.item()
         )
+        return values, base_value
 
-    fig, axes = plt.subplots(
-        len(representatives), 2, figsize=(13.5, 3.25 * len(representatives)),
-        gridspec_kw={"width_ratios": [1, 3.3]}, squeeze=False,
+    tree_models = getattr(model, "models", [model])
+    explanations = [explain_tree_ensemble(tree_model) for tree_model in tree_models]
+    return (
+        np.mean([values for values, _ in explanations], axis=0),
+        float(np.mean([base for _, base in explanations])),
     )
-    records: list[dict] = []
-    for row, (example, contributions) in enumerate(zip(representatives, shap_values)):
-        image_ax, contribution_ax = axes[row]
-        image_ax.imshow(example.image)
-        image_ax.set_xticks([])
-        image_ax.set_yticks([])
-        image_ax.set_ylabel(example.group, fontsize=11, fontweight="bold", labelpad=12)
-        image_ax.set_title(f"row {example.row_id} | source={example.source_class}")
-
-        family_values = []
-        family_labels = []
-        for family_name, prefix in FEATURE_FAMILIES:
-            family_indices = np.array(
-                [index for index, name in enumerate(FEATURE_NAMES) if name.startswith(prefix)]
-            )
-            strongest = int(
-                family_indices[np.argmax(np.abs(contributions[family_indices]))]
-            )
-            family_values.append(float(contributions[family_indices].sum()))
-            family_labels.append(
-                f"{family_name}\n(top: {shorten_feature_name(FEATURE_NAMES[strongest], 38)})"
-            )
-        values = np.asarray(family_values)
-        labels = family_labels
-        colors = ["#d95f02" if value > 0 else "#1b75bc" for value in values]
-        y = np.arange(len(values))
-        contribution_ax.barh(y, values, color=colors, alpha=0.88)
-        contribution_ax.axvline(0, color="black", linewidth=0.8)
-        contribution_ax.set_yticks(y, labels, fontsize=8)
-        contribution_ax.set_xlabel("Tree SHAP contribution to AI probability")
-        contribution_ax.set_title(
-            f"base {base_value:.3f} + contributions = AI score {example.score:.3f}; "
-            f"decision threshold {example.threshold:.3f}",
-            fontsize=10,
-        )
-        contribution_ax.grid(axis="x", alpha=0.2)
-        order = np.argsort(np.abs(contributions), kind="stable")[-max_features:]
-        for index in order:
-            records.append(
-                {
-                    "row_index": example.index,
-                    "row_id": example.row_id,
-                    "group": example.group,
-                    "score": example.score,
-                    "base_value": base_value,
-                    "feature": FEATURE_NAMES[int(index)],
-                    "feature_value": float(features[example.index, index]),
-                    "shap_value": float(contributions[index]),
-                }
-            )
-    fig.suptitle(
-        "How the Extra Trees ensemble reached representative Task 3 decisions",
-        fontsize=14,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.98))
-    fig.savefig(path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    return records, base_value, maximum_error
 
 
 def explanation_group(name: str) -> str:
@@ -427,13 +270,21 @@ def plot_shap_subgroups(
     examples: dict[str, list[Example]],
     features: np.ndarray,
     model,
-) -> dict:
+) -> tuple[dict, float, float]:
     """Show which understandable feature groups drive each selected example."""
 
     selected = [example for name, *_ in GROUPS for example in examples[name]]
-    shap_values, _ = positive_class_shap(
+    shap_values, base_value = positive_class_shap(
         model, features[[example.index for example in selected]]
     )
+    reconstructed = base_value + shap_values.sum(axis=1)
+    maximum_error = float(
+        np.max(np.abs(reconstructed - np.asarray([example.score for example in selected])))
+    )
+    if maximum_error > 1e-5:
+        raise RuntimeError(
+            f"Tree SHAP additivity check failed (maximum error {maximum_error:g})."
+        )
     group_names = list(dict.fromkeys(explanation_group(name) for name in FEATURE_NAMES))
     group_indices = {
         group: np.array(
@@ -441,11 +292,11 @@ def plot_shap_subgroups(
         )
         for group in group_names
     }
-    values = np.vstack(
+    individual_values = np.vstack(
         [shap_values[:, indices].sum(axis=1) for indices in group_indices.values()]
     )
-    order = np.argsort(np.mean(np.abs(values), axis=1))[::-1]
-    values = values[order]
+    order = np.argsort(np.mean(np.abs(individual_values), axis=1))[::-1]
+    individual_values = individual_values[order]
     labels = [group_names[i] for i in order]
     short_names = {
         "False Positives": "FP: real called AI",
@@ -453,24 +304,49 @@ def plot_shap_subgroups(
         "True Positives": "TP: AI called AI",
         "True Negatives": "TN: real called real",
     }
-    column_labels = [
-        f"{short_names[example.group]}\nrow {example.row_id}" for example in selected
-    ]
+    columns = []
+    column_labels = []
+    outcome_means = {}
+    start = 0
+    block_centres = []
+    for name, *_ in GROUPS:
+        group_examples = examples[name]
+        stop = start + len(group_examples)
+        block = individual_values[:, start:stop]
+        mean = block.mean(axis=1, keepdims=True)
+        columns.extend([block, mean])
+        column_labels.extend([f"row {example.row_id}" for example in group_examples] + ["Mean"])
+        block_centres.append((len(column_labels) - (len(group_examples) + 2) / 2, short_names[name]))
+        outcome_means[name] = {
+            label: float(value) for label, value in zip(labels, mean[:, 0])
+        }
+        start = stop
+    values = np.hstack(columns)
     limit = float(np.max(np.abs(values)))
-    fig, ax = plt.subplots(figsize=(14, 6.8))
+    fig, ax = plt.subplots(figsize=(15.5, 6.8))
     image = ax.imshow(values, aspect="auto", cmap="RdBu_r", vmin=-limit, vmax=limit)
-    ax.set_xticks(np.arange(len(selected)), column_labels, rotation=55, ha="right", fontsize=7)
     ax.set_yticks(np.arange(len(labels)), labels, fontsize=9)
-    ax.set_title("Tree SHAP split into feature groups (red pushes AI, blue pushes real)")
+    ax.set_xticks(np.arange(len(column_labels)), column_labels, rotation=55, ha="right", fontsize=7)
+    for centre, group_label in block_centres:
+        ax.text(centre, 1.02, group_label, transform=ax.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=9, fontweight="bold")
+    for boundary in np.cumsum([len(examples[name]) + 1 for name, *_ in GROUPS])[:-1]:
+        ax.axvline(boundary - 0.5, color="black", linewidth=1.2)
+    ax.set_title("Tree SHAP split into feature groups (red pushes AI, blue pushes real)", pad=35)
     fig.colorbar(image, ax=ax, label="SHAP contribution to AI score", shrink=0.8)
     fig.tight_layout()
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
-    return {
-        "plot": path.name,
-        "examples": len(selected),
-        "groups": labels,
-    }
+    return (
+        {
+            "plot": path.name,
+            "examples": len(selected),
+            "groups": labels,
+            "mean_contributions_by_outcome": outcome_means,
+        },
+        base_value,
+        maximum_error,
+    )
 
 
 def plot_lowbit_diagnostic(
@@ -527,23 +403,14 @@ def plot_lowbit_diagnostic(
     }
 
 
-def write_shap_csv(path: Path, records: list[dict]) -> None:
-    if not records:
-        return
-    with path.open("w", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=list(records[0]))
-        writer.writeheader()
-        writer.writerows(records)
-
-
 def main() -> int:
     args = parse_args()
-    if args.examples_per_group <= 0 or args.shap_features <= 0:
-        raise SystemExit("example and SHAP feature counts must be positive")
+    if args.examples_per_group <= 0:
+        raise SystemExit("examples per group must be positive")
 
     data_dir, artifacts_dir = paths()
-    model, features, labels, sources, scores, predictions, thresholds = load_task3(
-        artifacts_dir, args.split
+    model, features, labels, sources, scores, predictions, thresholds = load_model(
+        artifacts_dir, args.task, args.split
     )
     selected = select_examples(
         labels, predictions, scores - thresholds, args.examples_per_group
@@ -558,36 +425,27 @@ def main() -> int:
         thresholds,
     )
 
-    output_dir = artifacts_dir / "task03"
+    output_dir = artifacts_dir / args.task
     output_dir.mkdir(parents=True, exist_ok=True)
-    grid_stem = f"{args.split}_errors_vs_correct_grid"
-    plot_error_grid(
-        output_dir / f"{grid_stem}.png",
+    subgroup_summary, base_value, maximum_error = plot_shap_subgroups(
+        output_dir / f"{args.split}_tree_shap_subgroups.png",
         examples,
-        args.examples_per_group,
+        features,
+        model,
     )
-    write_examples_csv(output_dir / f"{grid_stem}.csv", examples)
 
     summary = {
         "split": args.split,
-        "threshold": "quality-aware per image",
+        "task": args.task,
+        "threshold": (
+            "quality-aware per image"
+            if not np.allclose(thresholds, thresholds[0])
+            else float(thresholds[0])
+        ),
         "feature_version": FEATURE_VERSION,
         "groups": {name: len(examples[name]) for name, *_ in GROUPS},
         "selection": "most confident examples in each confusion-matrix outcome",
-        "grid": f"{grid_stem}.png",
-    }
-    if not args.skip_shap:
-        shap_stem = f"{args.split}_tree_shap_decisions"
-        records, base_value, maximum_error = plot_tree_shap_decisions(
-            output_dir / f"{shap_stem}.png",
-            examples,
-            features,
-            model,
-            min(args.shap_features, len(FEATURE_NAMES)),
-        )
-        write_shap_csv(output_dir / f"{shap_stem}.csv", records)
-        summary["tree_shap"] = {
-            "plot": f"{shap_stem}.png",
+        "tree_shap": {
             "base_ai_probability": base_value,
             "maximum_additivity_error": maximum_error,
             "feature_perturbation": "tree_path_dependent",
@@ -597,13 +455,10 @@ def main() -> int:
                 "Correlated engineered features can share or redistribute attribution.",
                 "Tree-path-dependent results depend on the fitted trees and their training-path counts.",
             ],
-        }
-        summary["tree_shap_subgroups"] = plot_shap_subgroups(
-            output_dir / f"{args.split}_tree_shap_subgroups.png",
-            examples,
-            features,
-            model,
-        )
+        },
+        "tree_shap_subgroups": subgroup_summary,
+    }
+    if args.task == "task03":
         summary["lowbit_diagnostic"] = plot_lowbit_diagnostic(
             output_dir / f"{args.split}_lowbit_false_negative.png",
             examples,

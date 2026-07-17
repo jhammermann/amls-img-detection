@@ -21,7 +21,7 @@ os.environ["XDG_CACHE_HOME"] = str(_CACHE_ROOT)
 import numpy as np
 
 from clean import DEFAULT_IMAGE_SIZE, clean_image_bytes
-from prepare_features import (
+from prepare import (
     FEATURE_NAMES,
     FEATURE_VERSION,
     extract_features,
@@ -118,7 +118,8 @@ def main() -> int:
     validate_bundle(bundle)
     validate_schema(json.loads((feature_task_dir / "schema.json").read_text()))
     model = bundle["model"]
-    model.set_params(n_jobs=1)
+    if "n_jobs" in model.get_params():
+        model.set_params(n_jobs=1)
     threshold_payload = json.loads((feature_task_dir / "threshold.json").read_text())
     if threshold_payload.get("complete") is not True:
         raise RuntimeError("Training did not complete threshold calibration.")

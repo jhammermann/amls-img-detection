@@ -22,12 +22,35 @@ for variable in (
 
 import numpy as np
 
-from prepare_features import FEATURE_NAMES, FEATURE_VERSION
+from prepare import FEATURE_NAMES, FEATURE_VERSION
 
 
 MAX_FPR = 0.20
+CALIBRATION_TARGET_FPR = 0.19
 THRESHOLD_FAILURE_PROBABILITY = 0.05
 ONE_SIDED_NORMAL_95 = 1.6448536269514722
+
+
+class AveragingTreeEnsemble:
+    """Average probabilities from independently fitted tree ensembles."""
+
+    def __init__(self, models: list) -> None:
+        self.models = models
+        self.classes_ = np.asarray([0, 1], dtype=np.int8)
+        self.estimators_ = [tree for model in models for tree in model.estimators_]
+
+    def get_params(self, deep: bool = True) -> dict:
+        return {"n_jobs": self.models[0].get_params().get("n_jobs")}
+
+    def set_params(self, **params):
+        for model in self.models:
+            model.set_params(**params)
+        return self
+
+    def predict_proba(self, features: np.ndarray) -> np.ndarray:
+        return np.mean(
+            [model.predict_proba(features) for model in self.models], axis=0
+        )
 
 
 def artifacts_path() -> Path:
@@ -61,10 +84,10 @@ def load_prepared(
 ]:
     summary_path = prepared_dir / "summary.json"
     if not summary_path.exists():
-        raise FileNotFoundError(f"Missing {summary_path}; run prepare_features.py first.")
+        raise FileNotFoundError(f"Missing {summary_path}; run prepare.py first.")
     summary = json.loads(summary_path.read_text())
     if not summary.get("complete"):
-        raise RuntimeError("Feature preparation did not complete; rerun prepare_features.py.")
+        raise RuntimeError("Feature preparation did not complete; rerun prepare.py.")
     if summary.get("feature_version") != FEATURE_VERSION:
         raise RuntimeError(
             f"Prepared feature version {summary.get('feature_version')!r} does not match "
@@ -232,6 +255,32 @@ def threshold_at_bounded_fpr(
     }
 
 
+def threshold_at_empirical_fpr(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    target_fpr: float = CALIBRATION_TARGET_FPR,
+) -> dict:
+    """Choose a tie-safe empirical threshold with margin below the FPR limit."""
+
+    real_scores = np.sort(np.asarray(scores, dtype=np.float64)[np.asarray(labels) == 0])
+    if len(real_scores) == 0:
+        raise ValueError("Calibration data contains no real images.")
+    allowed = max(1, int(np.floor(target_fpr * len(real_scores))))
+    threshold = float(np.nextafter(real_scores[-allowed], np.inf))
+    false_positives = int(np.count_nonzero(real_scores >= threshold))
+    return {
+        "method": "tie_safe_empirical_fpr",
+        "threshold": threshold,
+        "target_fpr": float(target_fpr),
+        "max_fpr": float(MAX_FPR),
+        "real_rows": int(len(real_scores)),
+        "allowed_false_positives": int(allowed),
+        "observed_false_positives": false_positives,
+        "calibration_fpr": float(false_positives / len(real_scores)),
+        "tie_safe": True,
+    }
+
+
 def metrics_at_threshold(
     scores: np.ndarray,
     labels: np.ndarray,
@@ -337,7 +386,7 @@ def main() -> int:
         import sklearn
         from sklearn.ensemble import ExtraTreesClassifier
     except ImportError as exc:
-        raise SystemExit("train_features.py needs scikit-learn from requirements.txt.") from exc
+        raise SystemExit("train.py needs scikit-learn from requirements.txt.") from exc
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -441,7 +490,7 @@ def main() -> int:
     final_model.set_params(n_jobs=1)
     calibration_x, calibration_y, calibration_source = splits["calibration"]
     calibration_scores = predict_scores(final_model, calibration_x)
-    threshold_info = threshold_at_bounded_fpr(calibration_scores, calibration_y)
+    threshold_info = threshold_at_empirical_fpr(calibration_scores, calibration_y)
     threshold_info["feature_version"] = FEATURE_VERSION
     threshold_info["model_estimators"] = completed_iteration
     threshold_info["complete"] = True
