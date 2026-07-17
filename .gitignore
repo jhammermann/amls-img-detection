@@ -125,3 +125,10 @@ models/
 artifacts/
 data-readonly/
 report.*
+!report.pdf
+
+# Local-only project files outside the exercise submission
+.texlive/
+README.md
+solution/prepare_cnn.py
+solution/train_cnn.py
